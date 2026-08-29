@@ -20,6 +20,12 @@ function shapeEstimate(row) {
     ...rest,
     estimateAmount: num(rest.estimateAmount),
     jobAmount: num(rest.jobAmount),
+    techAdvancePayment: num(rest.techAdvancePayment) || 0,
+    commissionPercent: num(rest.commissionPercent) || 0,
+    techBonus: num(rest.techBonus) || 0,
+    membershipBonus: num(rest.membershipBonus) || 0,
+    googleStarBonus: num(rest.googleStarBonus) || 0,
+    yelpStarBonus: num(rest.yelpStarBonus) || 0,
     installers: (EstimateInstaller || []).map((j) => j.installer).filter(Boolean)
   };
 }
@@ -80,13 +86,26 @@ export async function listEstimates(supabase, filters) {
   const { data, error } = await query.order(filters.sortKey, { ascending: filters.sortDir === 'asc' });
   throwIf(error);
   const matched = (data || []).map(shapeEstimate).filter((row) => matchesSearch(row, filters.q));
+  const withPayments = await attachUnconfirmed(supabase, matched);
   const start = (filters.page - 1) * filters.pageSize;
   return {
-    rows: matched.slice(start, start + filters.pageSize),
-    summary: buildSummary(matched),
+    rows: withPayments.slice(start, start + filters.pageSize),
+    summary: buildSummary(withPayments),
     page: filters.page,
     pageSize: filters.pageSize
   };
+}
+
+async function attachUnconfirmed(supabase, rows) {
+  const ids = rows.filter((r) => r.converted).map((r) => r.id);
+  if (!ids.length) return rows.map((r) => ({ ...r, unconfirmedPayments: 0 }));
+  const { data: pays, error } = await supabase.from('JobPayment').select('estimateId, confirmed').in('estimateId', ids);
+  throwIf(error);
+  const pending = {};
+  for (const p of pays || []) {
+    if (!p.confirmed) pending[p.estimateId] = (pending[p.estimateId] || 0) + 1;
+  }
+  return rows.map((r) => ({ ...r, unconfirmedPayments: pending[r.id] || 0 }));
 }
 
 export async function getEstimate(supabase, id) {
@@ -116,7 +135,7 @@ function jobFields(data) {
   };
 }
 
-async function replaceInstallers(supabase, estimateId, installerIds) {
+export async function replaceInstallers(supabase, estimateId, installerIds) {
   const { error: delError } = await supabase.from('EstimateInstaller').delete().eq('estimateId', estimateId);
   throwIf(delError);
   if (!installerIds?.length) return;

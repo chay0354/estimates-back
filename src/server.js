@@ -30,5 +30,15 @@ export default app;
 
 if (!process.env.VERCEL) {
   const port = Number(process.env.PORT || 4000);
-  app.listen(port, () => console.log('API listening on http://localhost:' + port + '/api'));
+  const bind = (tries = 0) => {
+    const server = app.listen(port, () => console.log('API listening on http://localhost:' + port + '/api'));
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE' && tries < 8) {
+        setTimeout(() => bind(tries + 1), 250);
+        return;
+      }
+      throw err;
+    });
+  };
+  bind();
 }

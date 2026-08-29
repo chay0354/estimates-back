@@ -11,3 +11,8 @@ export const createCustomerSchema = z.object({
 export const namedLookupSchema = z.object({
   name: z.string().trim().min(1, 'Name is required')
 });
+
+export const updateNamedSchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  active: z.boolean().optional()
+});
