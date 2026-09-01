@@ -93,6 +93,7 @@ export function jobTotals(job) {
     customerBalance: money(jobAmount - payments),
     confirmedPayments,
     unconfirmedPayments: (job.payments || []).filter((p) => !p.confirmed).length,
+    depositCovered: jobAmount > 0 && payments + 0.001 >= jobAmount,
     jobAmount,
     profit,
     profitPct: pct(profit),
@@ -161,14 +162,59 @@ const JOB_PATCH_KEYS = [
   'jobNumber', 'jobLink', 'jobDate', 'jobAmount', 'jobStatus', 'serviceFusionId',
   'googleReview', 'yelpReview', 'fullRebate', 'mixedRebate', 'membershipSold', 'techAdvancePayment',
   'commissionPercent', 'techBonus', 'membershipBonus', 'googleStarBonus', 'yelpStarBonus',
-  'adminApproved'
+  'adminApproved', 'awaitingDeposit'
 ];
+
+function depositsCovered(job) {
+  return Boolean(job.totals?.depositCovered);
+}
+
+async function maybePromoteToReadyToClose(supabase, id, actorId) {
+  const job = await getJob(supabase, id);
+  if (!job.awaitingDeposit) return job;
+  if (job.jobStatus !== 'Work In Progress') return job;
+  if (!depositsCovered(job)) return job;
+  const { error } = await supabase.from('Estimate').update({
+    jobStatus: 'Ready To Close',
+    updatedAt: new Date().toISOString()
+  }).eq('id', id);
+  throwIf(error);
+  await supabase.from('EstimateEvent').insert({
+    estimateId: id, field: 'jobStatus', from: job.jobStatus, to: 'Ready To Close', actorId: actorId || null
+  });
+  return getJob(supabase, id);
+}
 
 export async function updateJob(supabase, id, data, user) {
   const before = await getJob(supabase, id);
+  if (data.requestReadyToClose) {
+    const patch = {
+      awaitingDeposit: true,
+      googleReview: data.googleReview ?? before.googleReview,
+      yelpReview: data.yelpReview ?? before.yelpReview,
+      fullRebate: data.fullRebate ?? before.fullRebate,
+      mixedRebate: data.mixedRebate ?? before.mixedRebate,
+      membershipSold: data.membershipSold ?? before.membershipSold,
+      updatedAt: new Date().toISOString()
+    };
+    if (depositsCovered(before)) patch.jobStatus = 'Ready To Close';
+    const { error } = await supabase.from('Estimate').update(patch).eq('id', id);
+    throwIf(error);
+    if (patch.jobStatus && patch.jobStatus !== before.jobStatus) {
+      await supabase.from('EstimateEvent').insert({
+        estimateId: id, field: 'jobStatus', from: before.jobStatus, to: patch.jobStatus, actorId: user.id
+      });
+    }
+    return getJob(supabase, id);
+  }
   if (data.jobStatus && data.jobStatus !== before.jobStatus) {
-    if (data.jobStatus === 'Ready To Close' && before.totals.unconfirmedPayments > 0) {
-      throw forbidden('Accounting must confirm every customer payment before closing');
+    if (data.jobStatus === 'Ready To Close') {
+      if (!before.awaitingDeposit) {
+        throw forbidden('Send the job to Confirm Deposit first');
+      }
+      if (!depositsCovered(before)) {
+        throw forbidden('Deposits must equal the job amount before Ready to Close');
+      }
     }
     if (['Admin Approval', 'Closed'].includes(data.jobStatus) && !['ADMIN', 'MANAGER'].includes(user.role)) {
       throw forbidden('Only a manager or admin can approve and close a job');
@@ -196,7 +242,8 @@ export async function addItem(supabase, id, kind, data) {
   if (!spec) throw notFound('Unknown job section');
   const { data: row, error } = await supabase.from(spec.table).insert({ estimateId: id, ...spec.map(data) }).select('id').single();
   throwIf(error);
-  return getJob(supabase, id).then((job) => ({ job, id: row.id }));
+  const job = kind === 'payments' ? await maybePromoteToReadyToClose(supabase, id) : await getJob(supabase, id);
+  return { job, id: row.id };
 }
 
 export async function updateItem(supabase, id, kind, itemId, data) {
@@ -205,7 +252,7 @@ export async function updateItem(supabase, id, kind, itemId, data) {
   if (!spec) throw notFound('Unknown job section');
   const { error } = await supabase.from(spec.table).update(spec.map(data)).eq('id', itemId).eq('estimateId', id);
   throwIf(error);
-  return getJob(supabase, id);
+  return kind === 'payments' ? maybePromoteToReadyToClose(supabase, id) : getJob(supabase, id);
 }
 
 export async function removeItem(supabase, id, kind, itemId) {
@@ -214,7 +261,7 @@ export async function removeItem(supabase, id, kind, itemId) {
   if (!spec) throw notFound('Unknown job section');
   const { error } = await supabase.from(spec.table).delete().eq('id', itemId).eq('estimateId', id);
   throwIf(error);
-  return getJob(supabase, id);
+  return kind === 'payments' ? maybePromoteToReadyToClose(supabase, id) : getJob(supabase, id);
 }
 
 export async function confirmPayment(supabase, id, itemId, data, user) {

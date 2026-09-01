@@ -91,7 +91,9 @@ export const jobPatchSchema = z.object({
   membershipBonus: money.optional(),
   googleStarBonus: money.optional(),
   yelpStarBonus: money.optional(),
-  adminApproved: z.boolean().optional()
+  adminApproved: z.boolean().optional(),
+  awaitingDeposit: z.boolean().optional(),
+  requestReadyToClose: z.boolean().optional()
 });
 
 const itemMoney = money;
@@ -148,6 +150,7 @@ export const listQuerySchema = z.object({
   estimateTypeId: z.string().default('all'),
   commissionStructure: z.string().default('all'),
   converted: z.enum(['any', 'yes', 'no']).default('any'),
+  technicianId: z.string().default('all'),
   minAmount: z.coerce.number().optional(),
   maxAmount: z.coerce.number().optional(),
   sortKey: z.enum(['estimateDate', 'estimateAmount', 'estimateNumber']).default('estimateDate'),

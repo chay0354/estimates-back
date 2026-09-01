@@ -85,7 +85,8 @@ export async function listEstimates(supabase, filters) {
   let query = applyFilters(supabase.from('Estimate').select(ESTIMATE_SELECT), filters);
   const { data, error } = await query.order(filters.sortKey, { ascending: filters.sortDir === 'asc' });
   throwIf(error);
-  const matched = (data || []).map(shapeEstimate).filter((row) => matchesSearch(row, filters.q));
+  let matched = (data || []).map(shapeEstimate).filter((row) => matchesSearch(row, filters.q));
+  matched = await filterByTechnician(supabase, matched, filters.technicianId);
   const withPayments = await attachUnconfirmed(supabase, matched);
   const start = (filters.page - 1) * filters.pageSize;
   return {
@@ -96,16 +97,45 @@ export async function listEstimates(supabase, filters) {
   };
 }
 
+async function filterByTechnician(supabase, rows, technicianId) {
+  if (!technicianId || technicianId === 'all' || !rows.length) return rows;
+  const ids = rows.map((r) => r.id);
+  const [labor, pays] = await Promise.all([
+    supabase.from('JobRepairLabor').select('estimateId').eq('technicianId', technicianId).in('estimateId', ids),
+    supabase.from('JobTechPayment').select('estimateId').eq('technicianId', technicianId).in('estimateId', ids)
+  ]);
+  throwIf(labor.error || pays.error);
+  const hit = new Set([...(labor.data || []), ...(pays.data || [])].map((r) => r.estimateId));
+  return rows.filter((r) => hit.has(r.id));
+}
+
 async function attachUnconfirmed(supabase, rows) {
   const ids = rows.filter((r) => r.converted).map((r) => r.id);
-  if (!ids.length) return rows.map((r) => ({ ...r, unconfirmedPayments: 0 }));
-  const { data: pays, error } = await supabase.from('JobPayment').select('estimateId, confirmed').in('estimateId', ids);
+  if (!ids.length) {
+    return rows.map((r) => ({ ...r, unconfirmedPayments: 0, totalPayments: 0, depositCovered: false }));
+  }
+  const { data: pays, error } = await supabase.from('JobPayment').select('estimateId, confirmed, amount, paymentDate').in('estimateId', ids);
   throwIf(error);
   const pending = {};
+  const totals = {};
+  const lines = {};
   for (const p of pays || []) {
+    const amt = Number(p.amount || 0);
+    totals[p.estimateId] = Math.round(((totals[p.estimateId] || 0) + amt) * 100) / 100;
     if (!p.confirmed) pending[p.estimateId] = (pending[p.estimateId] || 0) + 1;
+    (lines[p.estimateId] = lines[p.estimateId] || []).push({ amount: amt, paymentDate: p.paymentDate });
   }
-  return rows.map((r) => ({ ...r, unconfirmedPayments: pending[r.id] || 0 }));
+  return rows.map((r) => {
+    const totalPayments = totals[r.id] || 0;
+    const jobAmount = Number(r.jobAmount || r.estimateAmount || 0);
+    return {
+      ...r,
+      unconfirmedPayments: pending[r.id] || 0,
+      totalPayments,
+      depositCovered: jobAmount > 0 && totalPayments + 0.001 >= jobAmount,
+      deposits: lines[r.id] || []
+    };
+  });
 }
 
 export async function getEstimate(supabase, id) {
@@ -124,14 +154,16 @@ export async function getEstimate(supabase, id) {
 
 function jobFields(data) {
   if (data.converted !== true) {
-    return { jobStatus: null, jobLink: null, jobDate: null, jobAmount: null, installerIds: [] };
+    return { jobStatus: null, jobLink: null, jobDate: null, jobAmount: null, installerIds: [], awaitingDeposit: false };
   }
+  const today = new Date().toISOString().slice(0, 10);
   return {
-    jobStatus: data.jobStatus ?? null,
-    jobLink: data.jobLink ?? null,
-    jobDate: data.jobDate ?? null,
-    jobAmount: data.jobAmount ?? null,
-    installerIds: data.installerIds || []
+    jobStatus: data.jobStatus || 'Work In Progress',
+    jobLink: data.jobLink || data.estimateLink || null,
+    jobDate: data.jobDate || data.estimateDate || today,
+    jobAmount: data.jobAmount ?? data.estimateAmount ?? null,
+    installerIds: data.installerIds || [],
+    awaitingDeposit: false
   };
 }
 
@@ -163,8 +195,9 @@ export async function createEstimate(supabase, data, actorId) {
       estimateTypeId: data.estimateTypeId,
       assignedUserId: data.assignedUserId,
       commissionStructure: data.commissionStructure,
-      status: data.status,
+      status: data.converted ? WON_STATUS : data.status,
       converted: data.converted,
+      awaitingDeposit: job.awaitingDeposit,
       jobStatus: job.jobStatus,
       jobLink: job.jobLink,
       jobDate: job.jobDate,
