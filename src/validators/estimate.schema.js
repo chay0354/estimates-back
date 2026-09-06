@@ -53,6 +53,7 @@ export const estimateFields = {
   converted: z.boolean().default(false),
   status: z.enum(ESTIMATE_STATUSES),
   jobStatus: z.enum(JOB_STATUSES).optional(),
+  jobNumber: z.string().trim().optional(),
   jobLink: optionalLink,
   jobDate: z.coerce.date().optional(),
   jobAmount: money.optional(),

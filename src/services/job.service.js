@@ -79,11 +79,13 @@ export function jobTotals(job) {
   const confirmedPayments = (job.payments || []).filter((p) => p.confirmed).reduce((s, r) => s + money(r.amount), 0);
   const jobAmount = money(job.jobAmount ?? job.estimateAmount);
   const bonuses = money(job.techBonus) + money(job.membershipBonus) + money(job.googleStarBonus) + money(job.yelpStarBonus);
-  const profit = jobAmount - expenses - installerLabor - repairLabor;
-  const commission = profit * (money(job.commissionPercent) / 100);
-  const totalToTech = commission + bonuses;
-  const companyAfterTech = profit - totalToTech;
-  const techOpenBalance = totalToTech - money(job.techAdvancePayment);
+  const allCosts = money(expenses + installerLabor + repairLabor);
+  const profit = jobAmount - allCosts;
+  const commission = money(profit * (money(job.commissionPercent) / 100));
+  const totalToTech = money(commission + bonuses);
+  const companyAfterTech = money(profit - totalToTech);
+  const advance = money(job.techAdvancePayment);
+  const techOpenBalance = money(totalToTech - advance);
   const pct = (n) => (jobAmount ? Math.round((n / jobAmount) * 10000) / 100 : 0);
   return {
     totalExpenses: expenses,
@@ -95,8 +97,14 @@ export function jobTotals(job) {
     unconfirmedPayments: (job.payments || []).filter((p) => !p.confirmed).length,
     depositCovered: jobAmount > 0 && payments + 0.001 >= jobAmount,
     jobAmount,
+    allCosts,
+    allCostsPct: pct(allCosts),
     profit,
     profitPct: pct(profit),
+    techCommission: commission,
+    techCommissionPct: pct(commission),
+    advancePayment: advance,
+    advancePct: pct(advance),
     totalToTech,
     totalToTechPct: pct(totalToTech),
     companyProfitAfterTech: companyAfterTech,
@@ -216,7 +224,7 @@ export async function updateJob(supabase, id, data, user) {
         throw forbidden('Deposits must equal the job amount before Ready to Close');
       }
     }
-    if (['Admin Approval', 'Closed'].includes(data.jobStatus) && !['ADMIN', 'MANAGER'].includes(user.role)) {
+    if (['Admin Approval', 'Ready To Pay', 'Closed'].includes(data.jobStatus) && !['ADMIN', 'MANAGER'].includes(user.role)) {
       throw forbidden('Only a manager or admin can approve and close a job');
     }
   }
